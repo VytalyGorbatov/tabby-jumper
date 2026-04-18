@@ -1,5 +1,5 @@
 import { Injectable } from '@angular/core'
-import { AppService, HotkeysService, NotificationsService } from 'tabby-core'
+import { AppService, HotkeysService, LogService, Logger, NotificationsService, SplitTabComponent } from 'tabby-core'
 import { BaseTerminalTabComponent, XTermFrontend } from 'tabby-terminal'
 
 interface BookmarkEntry {
@@ -23,14 +23,22 @@ interface TabState {
 /** @hidden */
 @Injectable({ providedIn: 'root' })
 export class JumperService {
-    private tabStates = new WeakMap<BaseTerminalTabComponent<any>, TabState>()
+    private tabStates = new WeakMap<BaseTerminalTabComponent, TabState>()
+    private logger: Logger
 
     constructor (
         private app: AppService,
-        private hotkeys: HotkeysService,
+        hotkeys: HotkeysService,
+        log: LogService,
         private notifications: NotificationsService,
     ) {
+        this.logger = log.create('tabby-jumper')
+        this.logger.info('JumperService initialised')
+
         hotkeys.hotkey$.subscribe(h => {
+            if (h.startsWith('jumper-')) {
+                this.logger.info(`Hotkey received: ${h}`)
+            }
             switch (h) {
                 case 'jumper-prev-command':   this.jumpPrevCommand();   break
                 case 'jumper-next-command':   this.jumpNextCommand();   break
@@ -45,9 +53,10 @@ export class JumperService {
      * Called by JumperDecorator when the user presses Enter in a terminal.
      * Records the current cursor row as a command start line.
      */
-    recordCommandLine (tab: BaseTerminalTabComponent<any>): void {
+    recordCommandLine (tab: BaseTerminalTabComponent): void {
         const xterm = this.getXterm(tab)
         if (!xterm) {
+            this.logger.warn('recordCommandLine: could not get xterm instance (frontend not XTermFrontend or not ready)')
             return
         }
         const line: number = xterm.buffer.active.baseY + xterm.buffer.active.cursorY
@@ -56,27 +65,38 @@ export class JumperService {
         // Avoid duplicate entries for consecutive rapid enters
         if (state.commandLines[state.commandLines.length - 1] !== line) {
             state.commandLines.push(line)
+            this.logger.debug(`Recorded command at line ${line} (history size: ${state.commandLines.length})`)
             // Cap history to avoid unbounded growth
             if (state.commandLines.length > 1000) {
                 state.commandLines.shift()
             }
+        } else {
+            this.logger.debug(`Skipped duplicate command line ${line}`)
         }
-        state.commandIndex = state.commandLines.length - 1
+        state.commandIndex = state.commandLines.length
     }
 
     /**
-     * Bookmark the current cursor line of the given tab (or the active tab).
+     * Bookmark the selected line (if any selection exists) or the cursor line.
      */
-    addBookmark (tab?: BaseTerminalTabComponent<any>): void {
+    addBookmark (tab?: BaseTerminalTabComponent): void {
         const t = tab ?? this.getActiveTab()
         if (!t) {
+            this.logger.warn('addBookmark: no active terminal tab')
             return
         }
         const xterm = this.getXterm(t)
         if (!xterm) {
+            this.logger.warn('addBookmark: could not get xterm instance')
             return
         }
-        const line: number = xterm.buffer.active.baseY + xterm.buffer.active.cursorY
+
+        // Prefer the start row of the current selection; fall back to cursor row.
+        const selectionPosition = xterm.getSelectionPosition?.()
+        const cursorLine: number = xterm.buffer.active.baseY + xterm.buffer.active.cursorY
+        const line: number = selectionPosition ? selectionPosition.start.y : cursorLine
+        this.logger.info(`addBookmark: selectionPosition=${JSON.stringify(selectionPosition)}, cursorLine=${cursorLine}, resolved line=${line}`)
+
         const state = this.getOrCreateState(t)
 
         if (state.bookmarkEntries.some(e => e.line === line)) {
@@ -85,16 +105,17 @@ export class JumperService {
         }
 
         // registerMarker offset is relative to the current cursor row
-        const offsetFromCursor = line - (xterm.buffer.active.baseY + xterm.buffer.active.cursorY)
+        const offsetFromCursor = line - cursorLine
         const marker = xterm.registerMarker(offsetFromCursor)
+        const bookmarkWidth = 3
         const decoration = xterm.registerDecoration({
             marker,
-            // A narrow coloured bar in the left gutter of the terminal
-            width: 2,
+            x: xterm.cols - bookmarkWidth,
+            width: bookmarkWidth,
             // Paint a pip in the overview ruler (scrollbar overview) as well
             overviewRulerOptions: {
-                color: '#f5a623',
-                position: 'left',
+                color: '#d59139a4',
+                position: 'right',
             },
         })
 
@@ -109,38 +130,46 @@ export class JumperService {
 
         state.bookmarkEntries.push({ line, marker, decoration })
         state.bookmarkEntries.sort((a, b) => a.line - b.line)
+        this.logger.info(`Bookmark added at line ${line} (total: ${state.bookmarkEntries.length}), marker=${!!marker}, decoration=${!!decoration}`)
         this.notifications.notice(`Bookmarked line ${line + 1}`)
     }
 
     jumpPrevCommand (): void {
         const tab = this.getActiveTab()
         if (!tab) {
+            this.logger.warn('jumpPrevCommand: no active terminal tab')
             return
         }
         const state = this.tabStates.get(tab)
         if (!state || state.commandLines.length === 0) {
+            this.logger.info('jumpPrevCommand: no recorded commands yet')
             return
         }
         state.commandIndex = Math.max(0, state.commandIndex - 1)
+        this.logger.info(`jumpPrevCommand: index=${state.commandIndex}, line=${state.commandLines[state.commandIndex]}`)
         this.scrollToLine(tab, state.commandLines[state.commandIndex])
     }
 
     jumpNextCommand (): void {
         const tab = this.getActiveTab()
         if (!tab) {
+            this.logger.warn('jumpNextCommand: no active terminal tab')
             return
         }
         const state = this.tabStates.get(tab)
         if (!state || state.commandLines.length === 0) {
+            this.logger.info('jumpNextCommand: no recorded commands yet')
             return
         }
         state.commandIndex = Math.min(state.commandLines.length - 1, state.commandIndex + 1)
+        this.logger.info(`jumpNextCommand: index=${state.commandIndex}, line=${state.commandLines[state.commandIndex]}`)
         this.scrollToLine(tab, state.commandLines[state.commandIndex])
     }
 
     jumpPrevBookmark (): void {
         const tab = this.getActiveTab()
         if (!tab) {
+            this.logger.warn('jumpPrevBookmark: no active terminal tab')
             return
         }
         const state = this.tabStates.get(tab)
@@ -150,20 +179,23 @@ export class JumperService {
         }
         const xterm = this.getXterm(tab)
         if (!xterm) {
+            this.logger.warn('jumpPrevBookmark: could not get xterm instance')
             return
         }
-        const currentTop: number = xterm.buffer.active.baseY
+        const currentTop: number = xterm.buffer.active.viewportY
         const lines = state.bookmarkEntries.map(e => e.line)
         // Find the last bookmark strictly above the current viewport top
         const prev = [...lines].reverse().find(b => b < currentTop)
         // Wrap around to the last bookmark if none found above
         const target = prev !== undefined ? prev : lines[lines.length - 1]
+        this.logger.info(`jumpPrevBookmark: currentTop=${currentTop}, bookmarks=${JSON.stringify(lines)}, target=${target}`)
         this.scrollToLine(tab, target)
     }
 
     jumpNextBookmark (): void {
         const tab = this.getActiveTab()
         if (!tab) {
+            this.logger.warn('jumpNextBookmark: no active terminal tab')
             return
         }
         const state = this.tabStates.get(tab)
@@ -173,34 +205,73 @@ export class JumperService {
         }
         const xterm = this.getXterm(tab)
         if (!xterm) {
+            this.logger.warn('jumpNextBookmark: could not get xterm instance')
             return
         }
-        const currentTop: number = xterm.buffer.active.baseY
+        const currentTop: number = xterm.buffer.active.viewportY
         const lines = state.bookmarkEntries.map(e => e.line)
         // Find the first bookmark strictly below the current viewport top
         const next = lines.find(b => b > currentTop)
         // Wrap around to the first bookmark if none found below
         const target = next !== undefined ? next : lines[0]
+        this.logger.info(`jumpNextBookmark: currentTop=${currentTop}, bookmarks=${JSON.stringify(lines)}, target=${target}`)
         this.scrollToLine(tab, target)
     }
 
-    private scrollToLine (tab: BaseTerminalTabComponent<any>, line: number): void {
+    private scrollToLine (tab: BaseTerminalTabComponent, line: number): void {
         const xterm = this.getXterm(tab)
         if (!xterm) {
+            this.logger.warn('scrollToLine: could not get xterm instance')
             return
         }
+        this.logger.info(`scrollToLine: scrolling to line ${line}`)
         xterm.scrollToLine(line)
+        this.flashLine(xterm, line)
     }
 
-    private getActiveTab (): BaseTerminalTabComponent<any> | null {
-        const tab = this.app.activeTab
+    private flashLine (xterm: any, line: number): void {
+        const cursorLine: number = xterm.buffer.active.baseY + xterm.buffer.active.cursorY
+        const marker = xterm.registerMarker(line - cursorLine)
+        if (!marker) {
+            return
+        }
+        const decoration = xterm.registerDecoration({
+            marker,
+            width: xterm.cols,
+        })
+        if (!decoration) {
+            marker.dispose()
+            return
+        }
+        decoration.onRender((el: HTMLElement) => {
+            el.style.transition = 'none'
+            el.style.background = 'rgba(255, 220, 80, 0.35)'
+            // Force a reflow so the browser registers the start state before animating
+            void el.offsetHeight
+            el.style.transition = 'background 500ms ease-out'
+            el.style.background = 'rgba(255, 220, 80, 0)'
+        })
+        setTimeout(() => {
+            decoration.dispose()
+            marker.dispose()
+        }, 500)
+    }
+
+    private getActiveTab (): BaseTerminalTabComponent | null {
+        const activeTab = this.app.activeTab
+        // Unwrap SplitTabComponent to get the focused pane inside it
+        const tab = activeTab instanceof SplitTabComponent
+            ? activeTab.getFocusedTab()
+            : activeTab
+        this.logger.debug(`getActiveTab: resolved tab type=${tab?.constructor?.name ?? 'none'}`)
         if (tab instanceof BaseTerminalTabComponent) {
             return tab
         }
+        this.logger.warn(`getActiveTab: active tab is not a terminal (type: ${tab?.constructor?.name ?? 'none'})`)
         return null
     }
 
-    private getOrCreateState (tab: BaseTerminalTabComponent<any>): TabState {
+    private getOrCreateState (tab: BaseTerminalTabComponent): TabState {
         if (!this.tabStates.has(tab)) {
             this.tabStates.set(tab, { commandLines: [], commandIndex: -1, bookmarkEntries: [] })
         }
@@ -211,11 +282,20 @@ export class JumperService {
      * Returns the underlying xterm.js Terminal instance for the tab's frontend,
      * or null if the frontend is not an XTermFrontend.
      */
-    private getXterm (tab: BaseTerminalTabComponent<any>): any {
+    private getXterm (tab: BaseTerminalTabComponent): any {
         const frontend = (tab as any).frontend
-        if (frontend instanceof XTermFrontend) {
-            return (frontend as any).xterm ?? null
+        if (!frontend) {
+            this.logger.warn('getXterm: tab has no frontend yet')
+            return null
         }
-        return null
+        if (!(frontend instanceof XTermFrontend)) {
+            this.logger.warn(`getXterm: frontend is not XTermFrontend (type: ${frontend?.constructor?.name})`)
+            return null
+        }
+        const xterm = (frontend as any).xterm ?? null
+        if (!xterm) {
+            this.logger.warn('getXterm: XTermFrontend has no xterm instance yet')
+        }
+        return xterm
     }
 }

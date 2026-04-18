@@ -14,7 +14,7 @@ export class JumperContextMenuProvider extends TerminalContextMenuItemProvider {
         super()
     }
 
-    async getItems (tab: BaseTerminalTabComponent<any>): Promise<MenuItemOptions[]> {
+    async getItems (tab: BaseTerminalTabComponent): Promise<MenuItemOptions[]> {
         return [
             {
                 label: 'Bookmark this line',

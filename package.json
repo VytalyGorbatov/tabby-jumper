@@ -1,7 +1,7 @@
 {
   "name": "tabby-jumper",
   "version": "1.0.0",
-  "description": "Tabby plugin: jump to previous/next command and bookmark lines.",
+  "description": "Tabby plugin: jump to previous/next command call and bookmark lines.",
   "keywords": [
     "tabby-plugin"
   ],
@@ -18,19 +18,13 @@
   "author": "",
   "license": "MIT",
   "devDependencies": {
-    "@angular/animations": "^12.0.0",
     "@angular/common": "^12.0.0",
     "@angular/core": "^12.0.0",
-    "@angular/forms": "^12.0.0",
-    "@angular/platform-browser": "^12.0.0",
-    "@ng-bootstrap/ng-bootstrap": "^2.2.0",
     "@types/webpack-env": "^1.16.0",
-    "css-loader": "^5.1.1",
     "rxjs": "^7.3.0",
     "tabby-core": "^1.0.156",
-    "tabby-settings": "^1.0.156",
     "tabby-terminal": "^1.0.156",
-    "ts-loader": "^5.2.1",
+    "ts-loader": "^9.0.0",
     "typescript": "^4.2.3",
     "webpack": "^5.24.4",
     "webpack-cli": "^4.5.0"
